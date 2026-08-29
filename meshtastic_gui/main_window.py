@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 )
 
 from .bridge import MeshtasticBridge, ConnectWorker
+from .mqtt_proxy import MqttProxy
 from .tabs.dashboard_tab import DashboardTab
 from .tabs.nodes_tab import NodesTab
 from .tabs.messages_tab import MessagesTab
@@ -28,11 +29,14 @@ class MainWindow(QMainWindow):
         self.resize(1080, 720)
 
         self.bridge = MeshtasticBridge(self)
+        self.mqtt_proxy = MqttProxy(self)
         self.connect_worker = None
         self._connected = False
 
         self._build_ui()
         self._wire_bridge()
+        self.mqtt_proxy.log.connect(self.log_tab.append)
+        self.mqtt_proxy.status_changed.connect(lambda s: self.log_tab.append(f"[MQTT proxy] {s}"))
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -204,6 +208,11 @@ class MainWindow(QMainWindow):
             self.map_tab.set_my_node_id(self._my_node_id)
         self.log_tab.append("Koneksi berhasil dibuka.")
 
+        try:
+            self.mqtt_proxy.start(iface, iface.localNode.moduleConfig.mqtt, self._my_node_id)
+        except Exception as e:  # noqa: BLE001
+            self.log_tab.append(f"Tidak bisa menjalankan MQTT proxy: {e}")
+
     def _on_worker_failed(self, message):
         self.connect_btn.setEnabled(True)
         self.connect_btn.setText("Connect")
@@ -220,6 +229,7 @@ class MainWindow(QMainWindow):
             self._disconnect(silent=True)
 
     def _disconnect(self, silent=False):
+        self.mqtt_proxy.stop()
         self.bridge.detach()
         self._connected = False
         self.connect_btn.setText("Connect")
@@ -386,6 +396,10 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ lifecycle
     def closeEvent(self, event):
+        try:
+            self.mqtt_proxy.stop()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self.bridge.detach()
         except Exception:  # noqa: BLE001

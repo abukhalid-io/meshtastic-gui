@@ -14,6 +14,7 @@ dependencies = [
     "meshtastic>=2.5",
     "pyserial>=3.5",
     "pyqtlet2[PySide6]>=0.9",
+    "paho-mqtt>=2.1",
 ]
 
 [project.scripts]
