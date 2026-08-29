@@ -292,6 +292,18 @@ class MainWindow(QMainWindow):
             firmware_version=getattr(getattr(iface, "metadata", None), "firmware_version", None),
         )
 
+        # The device just did a lot of work for us in one burst (NodeDB
+        # dump, channels, settings/config reads) — starting the MQTT proxy
+        # immediately piles broker traffic on right on top of that. In
+        # practice the connection has been dying within ~1s of the proxy's
+        # first forwarded message, right when it's least settled. Give it a
+        # few seconds of breathing room first.
+        self.log_tab.append("Menunggu perangkat stabil sebelum menyalakan MQTT proxy...")
+        QTimer.singleShot(5000, lambda: self._start_mqtt_proxy_if_still_this_session(iface))
+
+    def _start_mqtt_proxy_if_still_this_session(self, iface):
+        if not self._connected or self.bridge.iface is not iface:
+            return  # disconnected or reconnected to a different session already
         try:
             self.mqtt_proxy.start(iface, iface.localNode.moduleConfig.mqtt, self._my_node_id)
         except Exception as e:  # noqa: BLE001
