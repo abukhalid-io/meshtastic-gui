@@ -8,5 +8,5 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 call ".venv\Scripts\activate.bat"
-pip install -q -r requirements.txt
+pip install -q -e .
 python main.py

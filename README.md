@@ -62,6 +62,19 @@ pip install -e .
 meshtastic-gui
 ```
 
+## Shortcut di Desktop
+
+Setelah install (lewat `run_windows.bat`/`run_linux.sh`, `pip install -e .`, atau `pipx install ...`), buat shortcut di Desktop dengan satu perintah:
+
+```bash
+meshtastic-gui-shortcut
+```
+
+- **Windows**: bikin `Meshtastic GUI.lnk` di Desktop, lengkap dengan ikon.
+- **Linux**: bikin launcher `.desktop` di Desktop *dan* entry di menu aplikasi (`~/.local/share/applications`) — jadi juga muncul kalau di-search di app launcher (GNOME/KDE/dll).
+
+Perintah ini otomatis mendeteksi environment Python yang lagi dipakai (venv lokal, pipx, dsb) dan mengarahkan shortcut-nya ke situ.
+
 ## Cara pakai singkat
 
 1. Colok perangkat Meshtastic ke laptop via USB.
@@ -87,6 +100,7 @@ meshtastic-gui/
     proto_form.py            # generator form dinamis dari protobuf config (Settings)
     theme.py                 # palet warna & stylesheet ala Meshtastic
     icon.py                  # ikon app (mesh/node, digambar langsung, tanpa aset eksternal)
+    shortcut.py               # `meshtastic-gui-shortcut` — bikin shortcut Desktop (Windows .lnk / Linux .desktop)
     utils.py
     tabs/
       dashboard_tab.py

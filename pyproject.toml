@@ -16,6 +16,9 @@ dependencies = [
 ]
 
 [project.scripts]
+meshtastic-gui-shortcut = "meshtastic_gui.shortcut:main"
+
+[project.gui-scripts]
 meshtastic-gui = "meshtastic_gui.app:main"
 
 [tool.setuptools.packages.find]

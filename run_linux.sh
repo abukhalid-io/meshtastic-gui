@@ -8,5 +8,5 @@ if [ ! -f ".venv/bin/python" ]; then
 fi
 
 source .venv/bin/activate
-pip install -q -r requirements.txt
+pip install -q -e .
 python main.py
