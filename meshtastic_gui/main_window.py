@@ -37,6 +37,8 @@ class MainWindow(QMainWindow):
         self._wire_bridge()
         self.mqtt_proxy.log.connect(self.log_tab.append)
         self.mqtt_proxy.status_changed.connect(lambda s: self.log_tab.append(f"[MQTT proxy] {s}"))
+        self.mqtt_proxy.connected_changed.connect(self.dashboard_tab.set_proxy_connected)
+        self.mqtt_proxy.node_seen.connect(self.dashboard_tab.upsert_mqtt_node)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):

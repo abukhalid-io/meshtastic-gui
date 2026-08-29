@@ -14,6 +14,7 @@ followed here (skip our own outbound topic, skip retained-by-default).
 import logging
 import ssl
 import threading
+import time
 
 from PySide6.QtCore import QObject, Signal
 from pubsub import pub
@@ -27,6 +28,8 @@ class MqttProxy(QObject):
     connection. Start once per connection; stop on disconnect."""
 
     status_changed = Signal(str)   # human-readable state, e.g. "Terhubung ke mqtt.meshtastic.org"
+    connected_changed = Signal(bool)  # the thing to trust for a "proxy is up" indicator
+    node_seen = Signal(dict)       # {"node_id", "gateway_id", "channel", "ts"} — a node heard via the broker
     log = Signal(str)
 
     def __init__(self, parent=None):
@@ -36,6 +39,11 @@ class MqttProxy(QObject):
         self._own_node_id = None
         self._root = "msh"
         self._subscribed_pubsub = False
+        self._connected = False
+
+    @property
+    def is_connected(self):
+        return self._connected
 
     # -- lifecycle -----------------------------------------------------------
     def start(self, iface, mqtt_config, own_node_id):
@@ -101,6 +109,9 @@ class MqttProxy(QObject):
                 pass
             self._client = None
         self._iface = None
+        if self._connected:
+            self._connected = False
+            self.connected_changed.emit(False)
 
     @property
     def is_running(self):
@@ -113,16 +124,23 @@ class MqttProxy(QObject):
             client.subscribe(topic)
             self.log.emit(f"MQTT proxy: terhubung ke broker, subscribe '{topic}'.")
             self.status_changed.emit("Terhubung ke broker MQTT")
+            self._connected = True
+            self.connected_changed.emit(True)
         else:
             self.log.emit(f"MQTT proxy: koneksi broker gagal (rc={rc}).")
             self.status_changed.emit(f"Gagal konek broker (rc={rc})")
+            self._connected = False
+            self.connected_changed.emit(False)
 
     def _on_disconnect(self, client, userdata, flags, rc=0, props=None):
         self.status_changed.emit("Terputus dari broker MQTT")
+        self._connected = False
+        self.connected_changed.emit(False)
         if rc != 0:
             self.log.emit(f"MQTT proxy: terputus dari broker (rc={rc}), paho akan reconnect otomatis.")
 
     def _on_message(self, client, userdata, message):
+        self._track_node(message)
         try:
             # Loop prevention: don't hand the device back its own uplinked
             # traffic, and skip retained state dumps (historical, not new).
@@ -136,6 +154,27 @@ class MqttProxy(QObject):
             iface.sendMqttClientProxyMessage(message.topic, message.payload)
         except Exception as e:  # noqa: BLE001
             self.log.emit(f"MQTT proxy: gagal meneruskan pesan broker->device: {e}")
+
+    def _track_node(self, message):
+        """Best-effort: peek at the envelope to report which node this
+        traffic came from, for the 'nodes seen via the broker' panel. The
+        packet header (from/gateway/channel) is readable even when the
+        payload itself (packet.encrypted) is not — no decryption needed."""
+        try:
+            from meshtastic.protobuf import mqtt_pb2
+            env = mqtt_pb2.ServiceEnvelope()
+            env.ParseFromString(message.payload)
+            from_num = getattr(env.packet, "from", 0)
+            if not from_num:
+                return
+            self.node_seen.emit({
+                "node_id": f"!{from_num:08x}",
+                "gateway_id": env.gateway_id or "-",
+                "channel": env.channel_id or "-",
+                "ts": time.time(),
+            })
+        except Exception:  # noqa: BLE001 - tracking is a nice-to-have, never fatal
+            pass
 
     # -- device -> broker (fires on the interface's own reader thread) ----
     def _on_proxy_message(self, proxymessage, interface):
