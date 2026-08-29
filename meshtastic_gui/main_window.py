@@ -76,7 +76,20 @@ class MainWindow(QMainWindow):
             self.debug_server.append_log(msg)
 
         self.log_tab.append = _append_and_mirror
+
+        original_transcript_append = self.messages_tab.transcript.append
+
+        def _append_transcript_and_mirror(html):
+            original_transcript_append(html)
+            # toPlainText() right here is still on the GUI thread (append()
+            # only ever gets called from here) — safe, unlike calling it
+            # from the HTTP handler's own thread would be.
+            self.debug_server.set_state(transcript=self.messages_tab.transcript.toPlainText())
+
+        self.messages_tab.transcript.append = _append_transcript_and_mirror
+
         self.debug_server.command_requested.connect(self._on_debug_command)
+        self.debug_server.send_requested.connect(self._on_debug_send)
         self.debug_server.set_state(connected=False, mqtt_proxy_connected=False, node_count=0)
         self.debug_server.start()
 
@@ -85,6 +98,9 @@ class MainWindow(QMainWindow):
             self._on_connect_clicked()
         elif command == "disconnect" and self._connected:
             self._disconnect()
+
+    def _on_debug_send(self, text, channel_index, destination_id):
+        self._send_text(text, channel_index, destination_id)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):

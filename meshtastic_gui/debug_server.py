@@ -22,6 +22,7 @@ from PySide6.QtCore import QObject, Signal
 
 class DebugServer(QObject):
     command_requested = Signal(str)  # "connect" | "disconnect"
+    send_requested = Signal(str, int, str)  # (text, channel_index, destination_id)
 
     def __init__(self, port=8765, parent=None):
         super().__init__(parent)
@@ -94,14 +95,33 @@ class DebugServer(QObject):
                     with server._lock:
                         text = "\n".join(server._log_lines)
                     self._text(text)
+                elif self.path == "/transcript":
+                    with server._lock:
+                        text = server._state.get("transcript", "")
+                    self._text(text)
                 else:
-                    self._json({"error": "not found", "try": ["/status", "/log"]}, 404)
+                    self._json({"error": "not found", "try": ["/status", "/log", "/transcript"]}, 404)
 
             def do_POST(self):  # noqa: N802 - stdlib API name
                 if self.path in ("/connect", "/disconnect"):
                     server.command_requested.emit(self.path.strip("/"))
                     self._json({"ok": True})
+                elif self.path == "/send":
+                    length = int(self.headers.get("Content-Length", 0))
+                    try:
+                        body = json.loads(self.rfile.read(length) or b"{}")
+                    except Exception:  # noqa: BLE001
+                        self._json({"error": "invalid JSON body"}, 400)
+                        return
+                    text = body.get("text", "")
+                    if not text:
+                        self._json({"error": "'text' is required"}, 400)
+                        return
+                    channel_index = int(body.get("channel_index", 0))
+                    destination_id = body.get("destination_id", "^all")
+                    server.send_requested.emit(text, channel_index, destination_id)
+                    self._json({"ok": True})
                 else:
-                    self._json({"error": "not found", "try": ["/connect", "/disconnect"]}, 404)
+                    self._json({"error": "not found", "try": ["/connect", "/disconnect", "/send"]}, 404)
 
         return Handler
