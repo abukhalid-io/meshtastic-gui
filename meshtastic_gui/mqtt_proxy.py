@@ -32,6 +32,15 @@ class MqttProxy(QObject):
     node_seen = Signal(dict)       # {"node_id", "gateway_id", "channel", "ts"} — a node heard via the broker
     log = Signal(str)
 
+    # Small boards (ESP32-C3 etc) have a tiny admin/serial queue. A busy
+    # community broker aggregates traffic from many separate physical mesh
+    # networks over msh/<root>/2/e/# — far more volume than any single LoRa
+    # mesh would ever produce. Blindly forwarding every message down to the
+    # device (as an earlier version of this file did) can flood that queue
+    # faster than the device can drain it, which is a very plausible cause
+    # of the device becoming unresponsive during heavy proxy use. Cap it.
+    FORWARD_MIN_INTERVAL_SECS = 0.5  # ~2 msg/s max forwarded to the device
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._client = None
@@ -40,6 +49,9 @@ class MqttProxy(QObject):
         self._root = "msh"
         self._subscribed_pubsub = False
         self._connected = False
+        self._last_forward_ts = 0.0
+        self._dropped_since_log = 0
+        self._last_drop_log_ts = 0.0
 
     @property
     def is_connected(self):
@@ -64,6 +76,9 @@ class MqttProxy(QObject):
         self._root = mqtt_config.root or "msh"
         self._iface = iface
         self._own_node_id = own_node_id
+        self._last_forward_ts = 0.0
+        self._dropped_since_log = 0
+        self._last_drop_log_ts = 0.0
 
         import paho.mqtt.client as mqtt
         client_id = f"MeshtasticGUI-{own_node_id or 'unknown'}"
@@ -158,6 +173,9 @@ class MqttProxy(QObject):
             self.log.emit(f"MQTT proxy: terputus dari broker (rc={rc}), paho akan reconnect otomatis.")
 
     def _on_message(self, client, userdata, message):
+        # Track for the 'seen via broker' panel regardless of whether we
+        # actually forward it down to the device — this is just a UI list,
+        # it doesn't touch the device's queue.
         self._track_node(message)
         try:
             # Loop prevention: don't hand the device back its own uplinked
@@ -166,6 +184,20 @@ class MqttProxy(QObject):
                 return
             if message.retain:
                 return
+
+            now = time.time()
+            if now - self._last_forward_ts < self.FORWARD_MIN_INTERVAL_SECS:
+                self._dropped_since_log += 1
+                if now - self._last_drop_log_ts > 10:
+                    self.log.emit(
+                        f"MQTT proxy: {self._dropped_since_log} pesan broker dilewati "
+                        f"(rate-limit, melindungi antrian perangkat) dalam 10 detik terakhir."
+                    )
+                    self._dropped_since_log = 0
+                    self._last_drop_log_ts = now
+                return
+            self._last_forward_ts = now
+
             iface = self._iface
             if iface is None:
                 return
