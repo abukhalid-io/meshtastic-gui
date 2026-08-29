@@ -401,6 +401,7 @@ class MainWindow(QMainWindow):
                 continue
             name = ch.settings.name or ("Default" if role == "PRIMARY" else "")
             result.append({"index": ch.index, "role": role, "name": name})
+        self.messages_tab.set_channel_names(result)
         return result
 
     def _import_channel_url(self, url):

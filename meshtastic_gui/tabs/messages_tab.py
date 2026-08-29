@@ -50,6 +50,17 @@ class MessagesTab(QWidget):
         for ch in range(8):
             self.target_combo.addItem(f"📢 Broadcast — Channel {ch}", (BROADCAST, ch, "^all"))
 
+    def set_channel_names(self, channels):
+        """channels: list of {"index", "role", "name"} (see main_window._get_channels).
+        Relabels the 8 fixed broadcast rows with the device's real channel
+        names (e.g. 'LongFast') instead of the generic 'Channel N' — this is
+        the channel we're actually broadcasting on when we hit Send."""
+        names = {c["index"]: c.get("name") for c in channels if c.get("name")}
+        for ch in range(8):
+            name = names.get(ch)
+            label = f"📢 Broadcast — {name} (ch{ch})" if name else f"📢 Broadcast — Channel {ch}"
+            self.target_combo.setItemText(ch, label)
+
     def update_known_nodes(self, nodes: dict):
         """nodes: {node_id: display_label}. Preserves the current selection
         if the target is still present after refresh."""
@@ -112,6 +123,7 @@ class MessagesTab(QWidget):
 
     def clear(self):
         self.transcript.clear()
+        self.set_channel_names([])  # reset to generic "Channel N" labels
 
 
 def _escape(text: str) -> str:
