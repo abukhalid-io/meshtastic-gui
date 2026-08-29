@@ -50,10 +50,21 @@ def _force_release_stream(port_hint=None):
 class ConnectWorker(QThread):
     """Opens a meshtastic interface off the GUI thread (the constructor blocks
     until the handshake with the device/node completes, which can take a
-    few seconds)."""
+    few seconds).
+
+    This particular class of hardware (small ESP32 boards especially) can go
+    fully unresponsive for a handshake attempt and then work fine moments
+    later — the failures are a clean ~30s silence, not "almost connected,
+    needs more time", so a bigger timeout doesn't help. What does help in
+    practice: just trying again a couple of times before giving up and
+    asking for a physical reset."""
 
     connected = Signal(object)   # emits the live interface instance
     failed = Signal(str)
+    retrying = Signal(int, int)  # (attempt_number, max_attempts) — before each retry
+
+    MAX_ATTEMPTS = 3
+    RETRY_DELAY_SECS = 3
 
     def __init__(self, mode, serial_port=None, tcp_host=None, parent=None):
         super().__init__(parent)
@@ -62,17 +73,26 @@ class ConnectWorker(QThread):
         self.tcp_host = tcp_host
 
     def run(self):
-        try:
-            if self.mode == "serial":
-                import meshtastic.serial_interface as si
-                iface = si.SerialInterface(devPath=self.serial_port or None)
-            else:
-                import meshtastic.tcp_interface as ti
-                iface = ti.TCPInterface(hostname=self.tcp_host)
-            self.connected.emit(iface)
-        except Exception as e:  # noqa: BLE001 - surface any failure to the UI
-            _force_release_stream(self.serial_port if self.mode == "serial" else None)
-            self.failed.emit(f"{e}\n{traceback.format_exc(limit=2)}")
+        last_error = None
+        last_trace = ""
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                self.retrying.emit(attempt, self.MAX_ATTEMPTS)
+                time.sleep(self.RETRY_DELAY_SECS)
+            try:
+                if self.mode == "serial":
+                    import meshtastic.serial_interface as si
+                    iface = si.SerialInterface(devPath=self.serial_port or None)
+                else:
+                    import meshtastic.tcp_interface as ti
+                    iface = ti.TCPInterface(hostname=self.tcp_host)
+                self.connected.emit(iface)
+                return
+            except Exception as e:  # noqa: BLE001 - surface any failure to the UI
+                _force_release_stream(self.serial_port if self.mode == "serial" else None)
+                last_error = e
+                last_trace = traceback.format_exc(limit=2)
+        self.failed.emit(f"{last_error}\n{last_trace}")
 
 
 class MeshtasticBridge(QObject):

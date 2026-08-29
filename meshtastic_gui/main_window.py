@@ -1,3 +1,4 @@
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QComboBox,
     QPushButton, QRadioButton, QButtonGroup, QLineEdit, QLabel, QMessageBox,
@@ -37,6 +38,11 @@ def _modem_preset_name(node):
 
 
 class MainWindow(QMainWindow):
+    # Extra full connect-attempt rounds (each with its own internal retries —
+    # see ConnectWorker) the app will try on its own before finally giving up
+    # and telling the user to power-cycle the device.
+    AUTO_RECONNECT_MAX_ROUNDS = 2
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Meshtastic GUI")
@@ -46,6 +52,7 @@ class MainWindow(QMainWindow):
         self.mqtt_proxy = MqttProxy(self)
         self.connect_worker = None
         self._connected = False
+        self._auto_reconnect_rounds_left = 0
 
         self._build_ui()
         self._wire_bridge()
@@ -186,32 +193,47 @@ class MainWindow(QMainWindow):
         self.nodes_tab.upsert_node(stub)
 
     # ---------------------------------------------------------- connect UI
+    def _build_connect_worker(self):
+        """Returns a fresh ConnectWorker using the current mode/port-or-host
+        fields, or None (with a warning shown) if they're not filled in."""
+        if self.mode_serial.isChecked():
+            port = self.port_combo.currentData()
+            if not port:
+                QMessageBox.warning(self, "Tidak ada port", "Pilih port serial dulu, atau klik Refresh.")
+                return None
+            return ConnectWorker(mode="serial", serial_port=port)
+        host = self.host_edit.text().strip()
+        if not host:
+            QMessageBox.warning(self, "Host kosong", "Isi alamat IP/hostname node dulu.")
+            return None
+        return ConnectWorker(mode="tcp", tcp_host=host)
+
+    def _start_connect_worker(self, worker, status_text="Menghubungkan ke perangkat..."):
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("Menghubungkan...")
+        self.statusBar().showMessage(status_text)
+
+        worker.connected.connect(self._on_worker_connected)
+        worker.failed.connect(self._on_worker_failed)
+        worker.retrying.connect(self._on_worker_retrying)
+        self.connect_worker = worker
+        worker.start()
+
     def _on_connect_clicked(self):
         if self._connected:
             self._disconnect()
             return
 
-        if self.mode_serial.isChecked():
-            port = self.port_combo.currentData()
-            if not port:
-                QMessageBox.warning(self, "Tidak ada port", "Pilih port serial dulu, atau klik Refresh.")
-                return
-            worker = ConnectWorker(mode="serial", serial_port=port)
-        else:
-            host = self.host_edit.text().strip()
-            if not host:
-                QMessageBox.warning(self, "Host kosong", "Isi alamat IP/hostname node dulu.")
-                return
-            worker = ConnectWorker(mode="tcp", tcp_host=host)
+        self._auto_reconnect_rounds_left = self.AUTO_RECONNECT_MAX_ROUNDS
+        worker = self._build_connect_worker()
+        if worker is None:
+            return
+        self._start_connect_worker(worker)
 
-        self.connect_btn.setEnabled(False)
-        self.connect_btn.setText("Menghubungkan...")
-        self.statusBar().showMessage("Menghubungkan ke perangkat...")
-
-        worker.connected.connect(self._on_worker_connected)
-        worker.failed.connect(self._on_worker_failed)
-        self.connect_worker = worker
-        worker.start()
+    def _on_worker_retrying(self, attempt, max_attempts):
+        text = f"Percobaan koneksi {attempt}/{max_attempts}..."
+        self.statusBar().showMessage(text)
+        self.log_tab.append(f"Menyambung ulang (percobaan {attempt}/{max_attempts})...")
 
     def _on_worker_connected(self, iface):
         self.bridge.attach(iface)
@@ -229,6 +251,7 @@ class MainWindow(QMainWindow):
             self.log_tab.append(f"Tidak bisa membangun halaman pengaturan: {e}")
 
         self._connected = True
+        self._auto_reconnect_rounds_left = 0
         self.connect_btn.setEnabled(True)
         self.connect_btn.setText("Disconnect")
         self.dashboard_tab.set_status("Terhubung", connected=True)
@@ -246,11 +269,33 @@ class MainWindow(QMainWindow):
             self.log_tab.append(f"Tidak bisa menjalankan MQTT proxy: {e}")
 
     def _on_worker_failed(self, message):
+        rounds_left = getattr(self, "_auto_reconnect_rounds_left", 0)
+        if rounds_left > 0:
+            self._auto_reconnect_rounds_left = rounds_left - 1
+            self.log_tab.append(
+                f"Gagal koneksi (akan dicoba otomatis lagi, {rounds_left} percobaan tersisa): {message.splitlines()[0]}"
+            )
+            self.statusBar().showMessage("Gagal, mencoba ulang otomatis...")
+            QTimer.singleShot(2000, self._retry_connect_worker)
+            return
+
         self.connect_btn.setEnabled(True)
         self.connect_btn.setText("Connect")
         self.statusBar().showMessage("Gagal terhubung")
         self.log_tab.append(f"Gagal koneksi: {message}")
-        QMessageBox.warning(self, "Gagal terhubung", message.splitlines()[0])
+        QMessageBox.warning(
+            self, "Gagal terhubung",
+            message.splitlines()[0] + "\n\nSudah dicoba berkali-kali otomatis. "
+            "Coba cabut-colok USB perangkatnya, lalu klik Connect lagi.",
+        )
+
+    def _retry_connect_worker(self):
+        if self._connected:
+            return  # something else already reconnected us
+        worker = self._build_connect_worker()
+        if worker is None:
+            return
+        self._start_connect_worker(worker, status_text="Menyambung ulang otomatis...")
 
     def _on_connection_established(self, summary):
         self.log_tab.append(f"meshtastic.connection.established: {summary}")
@@ -259,6 +304,9 @@ class MainWindow(QMainWindow):
         self.log_tab.append(reason)
         if self._connected:
             self._disconnect(silent=True)
+            self._auto_reconnect_rounds_left = self.AUTO_RECONNECT_MAX_ROUNDS
+            self.log_tab.append("Koneksi terputus tak terduga, mencoba menyambung ulang otomatis...")
+            QTimer.singleShot(2000, self._retry_connect_worker)
 
     def _disconnect(self, silent=False):
         self.mqtt_proxy.stop()
