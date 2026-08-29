@@ -16,6 +16,7 @@ class MessagesTab(QWidget):
         a node id ("!aabbccdd") for a direct message."""
         super().__init__(parent)
         self._on_send = on_send
+        self._pending_acks = {}  # packet_id -> short text preview, for the ack/nak follow-up line
 
         layout = QVBoxLayout(self)
 
@@ -105,11 +106,29 @@ class MessagesTab(QWidget):
         self._on_send(text, channel_index, destination_id)
         self.input.clear()
 
-    def add_outgoing(self, text, channel_index, destination_id="^all"):
+    def add_outgoing(self, text, channel_index, destination_id="^all", packet_id=None):
         ts = fmt_timestamp(__import__("time").time())
         target = "broadcast" if destination_id in (None, "^all") else destination_id
+        pending = ' <span style="color:#888">⏳</span>' if packet_id is not None else ""
         self.transcript.append(f'<span style="color:#888">[{ts}] ch{channel_index} → {_escape(target)} </span>'
-                                f'<b>Saya:</b> {_escape(text)}')
+                                f'<b>Saya:</b> {_escape(text)}{pending}')
+        if packet_id is not None:
+            preview = text if len(text) <= 30 else text[:30] + "…"
+            self._pending_acks[packet_id] = preview
+
+    def show_ack(self, packet_id, success: bool, reason: str):
+        """A wantAck response came back for something we sent — see
+        bridge.message_ack. For a broadcast this is an 'implicit ack' (the
+        firmware saw a neighbor rebroadcast it), not proof every node in
+        range got it — but it's a real signal, unlike the old 'sent to
+        radio and then silence' behavior."""
+        preview = self._pending_acks.pop(packet_id, None)
+        if preview is None:
+            return  # ack for a message from a previous session/transcript clear
+        if success:
+            self.transcript.append(f'<span style="color:#67ea94">✅ "{_escape(preview)}" terkonfirmasi diterima.</span>')
+        else:
+            self.transcript.append(f'<span style="color:#ff6b6b">❌ "{_escape(preview)}" gagal terkirim: {_escape(reason)}</span>')
 
     def add_incoming(self, msg: dict):
         ts = fmt_timestamp(msg.get("ts"))
@@ -124,6 +143,7 @@ class MessagesTab(QWidget):
     def clear(self):
         self.transcript.clear()
         self.set_channel_names([])  # reset to generic "Channel N" labels
+        self._pending_acks.clear()
 
 
 def _escape(text: str) -> str:

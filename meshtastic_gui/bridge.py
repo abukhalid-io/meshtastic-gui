@@ -103,6 +103,7 @@ class MeshtasticBridge(QObject):
     connection_established = Signal(dict)  # myInfo-ish summary
     connection_lost = Signal(str)
     connection_status_received = Signal(object)  # protobuf.DeviceConnectionStatus
+    message_ack = Signal(int, bool, str)  # (packet_id, success, reason) — did it actually get delivered
     log = Signal(str)
 
     def __init__(self, parent=None):
@@ -178,9 +179,41 @@ class MeshtasticBridge(QObject):
 
     # -- outbound actions ----------------------------------------------------
     def send_text(self, text, channel_index=0, destination_id="^all"):
+        """Sends with wantAck so we actually learn whether it was delivered
+        (see message_ack) instead of only knowing it was handed to the
+        radio. For a broadcast this is an "implicit ack" — the firmware
+        considers it delivered once it hears a neighbor rebroadcast the
+        same packet, not a guarantee every node in range got it, but it's
+        a real signal rather than none at all. Returns the packet id so the
+        caller can correlate the eventual ack/nak."""
         if not self.iface:
             raise RuntimeError("Not connected")
-        self.iface.sendText(text, destinationId=destination_id, channelIndex=channel_index)
+
+        # sendText() has no onResponseAckPermitted passthrough to sendData(),
+        # so a plain-ACK (no error, no extra payload) response only reaches
+        # our callback if the callback is literally named onAckNak — that's
+        # a real name-based special case in meshtastic-python's response
+        # dispatcher, not a typo.
+        def onAckNak(packet):  # noqa: N802 - name is load-bearing, see above
+            self._on_text_ack(packet)
+
+        packet = self.iface.sendText(
+            text, destinationId=destination_id, channelIndex=channel_index,
+            wantAck=True, onResponse=onAckNak,
+        )
+        return getattr(packet, "id", None)
+
+    def _on_text_ack(self, packet):
+        try:
+            decoded = packet.get("decoded", {}) or {}
+            request_id = decoded.get("requestId")
+            routing = decoded.get("routing", {}) or {}
+            reason = routing.get("errorReason", "NONE")
+            success = reason in (None, "NONE")
+            if request_id is not None:
+                self.message_ack.emit(request_id, success, reason or "NONE")
+        except Exception as e:  # noqa: BLE001
+            self.log.emit(f"Error handling message ack: {e}")
 
     def request_connection_status(self):
         """Asks the local node whether it currently has a live WiFi/Ethernet/

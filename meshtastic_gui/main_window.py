@@ -195,6 +195,7 @@ class MainWindow(QMainWindow):
         self.bridge.connection_established.connect(self._on_connection_established)
         self.bridge.connection_lost.connect(self._on_connection_lost)
         self.bridge.connection_status_received.connect(self.dashboard_tab.show_connection_status)
+        self.bridge.message_ack.connect(self.messages_tab.show_ack)
 
     def _on_node_updated(self, node):
         self.nodes_tab.upsert_node(node)
@@ -384,8 +385,8 @@ class MainWindow(QMainWindow):
 
     def _send_text(self, text, channel_index, destination_id="^all"):
         try:
-            self.bridge.send_text(text, channel_index=channel_index, destination_id=destination_id)
-            self.messages_tab.add_outgoing(text, channel_index, destination_id)
+            packet_id = self.bridge.send_text(text, channel_index=channel_index, destination_id=destination_id)
+            self.messages_tab.add_outgoing(text, channel_index, destination_id, packet_id=packet_id)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Gagal kirim pesan", str(e))
 
