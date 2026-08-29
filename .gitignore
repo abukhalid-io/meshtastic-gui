@@ -5,3 +5,6 @@ __pycache__/
 build/
 dist/
 assets/
+scratch_*.png
+*.log_screenshot*.png
+full_screenshot.png

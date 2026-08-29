@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
         root.addLayout(conn_row)
 
         self.tabs = QTabWidget()
-        self.dashboard_tab = DashboardTab()
+        self.dashboard_tab = DashboardTab(on_check_connection_status=self._check_connection_status)
         self.nodes_tab = NodesTab(actions={
             "favorite": self._favorite_node,
             "unfavorite": self._unfavorite_node,
@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
         self.bridge.log.connect(self.log_tab.append)
         self.bridge.connection_established.connect(self._on_connection_established)
         self.bridge.connection_lost.connect(self._on_connection_lost)
+        self.bridge.connection_status_received.connect(self.dashboard_tab.show_connection_status)
 
     def _on_node_updated(self, node):
         self.nodes_tab.upsert_node(node)
@@ -282,8 +283,28 @@ class MainWindow(QMainWindow):
 
     def _write_config(self, config_name):
         node = self._require_node()
+
+        # WiFi and Bluetooth share the ESP32's single 2.4GHz radio — running
+        # both at once adds RF contention and extra peak current draw, which
+        # is exactly what tends to brown out small boards (SuperMini-class)
+        # once WiFi is also active. Keep them mutually exclusive.
+        if config_name == "network" and node.localConfig.network.wifi_enabled:
+            if node.localConfig.bluetooth.enabled:
+                node.localConfig.bluetooth.enabled = False
+                node.writeConfig("bluetooth")
+                self.log_tab.append("WiFi diaktifkan -> Bluetooth otomatis dimatikan (satu radio 2.4GHz, hindari brownout).")
+        elif config_name == "bluetooth" and node.localConfig.bluetooth.enabled:
+            if node.localConfig.network.wifi_enabled:
+                node.localConfig.network.wifi_enabled = False
+                node.writeConfig("network")
+                self.log_tab.append("Bluetooth diaktifkan -> WiFi otomatis dimatikan (satu radio 2.4GHz, hindari brownout).")
+
         node.writeConfig(config_name)
         self.log_tab.append(f"Config '{config_name}' ditulis ke perangkat.")
+
+    def _check_connection_status(self):
+        self.bridge.request_connection_status()
+        self.log_tab.append("Meminta status koneksi (WiFi/Ethernet/Bluetooth/MQTT) ke perangkat...")
 
     def _reboot(self):
         node = self._require_node()

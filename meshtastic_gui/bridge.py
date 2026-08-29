@@ -82,6 +82,7 @@ class MeshtasticBridge(QObject):
     text_received = Signal(dict)         # {channel, fromId, toId, text, ts, isDirect}
     connection_established = Signal(dict)  # myInfo-ish summary
     connection_lost = Signal(str)
+    connection_status_received = Signal(object)  # protobuf.DeviceConnectionStatus
     log = Signal(str)
 
     def __init__(self, parent=None):
@@ -160,3 +161,26 @@ class MeshtasticBridge(QObject):
         if not self.iface:
             raise RuntimeError("Not connected")
         self.iface.sendText(text, destinationId=destination_id, channelIndex=channel_index)
+
+    def request_connection_status(self):
+        """Asks the local node whether it currently has a live WiFi/Ethernet/
+        MQTT/Bluetooth connection (DeviceConnectionStatus admin message).
+        Fire-and-forget: the reply arrives later via connection_status_received."""
+        if not self.iface:
+            raise RuntimeError("Not connected")
+        from meshtastic.protobuf import admin_pb2
+
+        p = admin_pb2.AdminMessage()
+        p.get_device_connection_status_request = True
+
+        def on_response(packet):
+            try:
+                status = packet["decoded"]["admin"]["raw"].get_device_connection_status_response
+                self.connection_status_received.emit(status)
+            except Exception as e:  # noqa: BLE001
+                self.log.emit(f"Gagal membaca status koneksi: {e}")
+
+        # meshtastic-python has no public wrapper for this specific admin
+        # message (unlike getMetadata()/setOwner()/etc.) — _sendAdmin is the
+        # same private helper those public methods use internally.
+        self.iface.localNode._sendAdmin(p, wantResponse=True, onResponse=on_response)
