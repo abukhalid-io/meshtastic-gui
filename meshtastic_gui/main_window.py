@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 
 from .bridge import MeshtasticBridge, ConnectWorker
+from .debug_server import DebugServer
 from .mqtt_proxy import MqttProxy
 from .tabs.dashboard_tab import DashboardTab
 from .tabs.nodes_tab import NodesTab
@@ -59,8 +60,31 @@ class MainWindow(QMainWindow):
         self.mqtt_proxy.log.connect(self.log_tab.append)
         self.mqtt_proxy.status_changed.connect(lambda s: self.log_tab.append(f"[MQTT proxy] {s}"))
         self.mqtt_proxy.connected_changed.connect(self.dashboard_tab.set_proxy_connected)
+        self.mqtt_proxy.connected_changed.connect(lambda b: self.debug_server.set_state(mqtt_proxy_connected=b))
         self.mqtt_proxy.node_seen.connect(self.dashboard_tab.upsert_mqtt_node)
         self.mqtt_proxy.node_seen.connect(self._on_mqtt_node_seen)
+
+        # -- local debug/control server (see debug_server.py) --------------
+        # Lets an external tool read live state / trigger connect-disconnect
+        # via plain HTTP instead of screenshotting the GUI and simulating
+        # clicks, which is slow and gets confused by other windows.
+        self.debug_server = DebugServer(port=8765, parent=self)
+        original_log_append = self.log_tab.append
+
+        def _append_and_mirror(msg):
+            original_log_append(msg)
+            self.debug_server.append_log(msg)
+
+        self.log_tab.append = _append_and_mirror
+        self.debug_server.command_requested.connect(self._on_debug_command)
+        self.debug_server.set_state(connected=False, mqtt_proxy_connected=False, node_count=0)
+        self.debug_server.start()
+
+    def _on_debug_command(self, command):
+        if command == "connect" and not self._connected:
+            self._on_connect_clicked()
+        elif command == "disconnect" and self._connected:
+            self._disconnect()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -176,6 +200,7 @@ class MainWindow(QMainWindow):
         self.nodes_tab.upsert_node(node)
         self.map_tab.upsert_node(node)
         self.messages_tab.update_known_nodes(self.nodes_tab.known_nodes())
+        self.debug_server.set_state(node_count=len(self.nodes_tab._nodes))
 
     def _on_mqtt_node_seen(self, info):
         """A node was heard via the MQTT broker (see mqtt_proxy.node_seen).
@@ -262,6 +287,10 @@ class MainWindow(QMainWindow):
         if self._my_node_id:
             self.map_tab.set_my_node_id(self._my_node_id)
         self.log_tab.append("Koneksi berhasil dibuka.")
+        self.debug_server.set_state(
+            connected=True, my_node_id=self._my_node_id,
+            firmware_version=getattr(getattr(iface, "metadata", None), "firmware_version", None),
+        )
 
         try:
             self.mqtt_proxy.start(iface, iface.localNode.moduleConfig.mqtt, self._my_node_id)
@@ -276,6 +305,7 @@ class MainWindow(QMainWindow):
                 f"Gagal koneksi (akan dicoba otomatis lagi, {rounds_left} percobaan tersisa): {message.splitlines()[0]}"
             )
             self.statusBar().showMessage("Gagal, mencoba ulang otomatis...")
+            self.debug_server.set_state(connected=False, last_error=message.splitlines()[0])
             QTimer.singleShot(2000, self._retry_connect_worker)
             return
 
@@ -283,6 +313,7 @@ class MainWindow(QMainWindow):
         self.connect_btn.setText("Connect")
         self.statusBar().showMessage("Gagal terhubung")
         self.log_tab.append(f"Gagal koneksi: {message}")
+        self.debug_server.set_state(connected=False, last_error=message.splitlines()[0])
         QMessageBox.warning(
             self, "Gagal terhubung",
             message.splitlines()[0] + "\n\nSudah dicoba berkali-kali otomatis. "
@@ -324,6 +355,7 @@ class MainWindow(QMainWindow):
         self.map_tab.set_enabled(False)
         self.map_tab.clear()
         self.statusBar().showMessage("Terputus" if not silent else "Koneksi terputus tak terduga")
+        self.debug_server.set_state(connected=False, mqtt_proxy_connected=False, node_count=0)
 
     # ----------------------------------------------------------- actions
     def _require_iface(self):
@@ -486,6 +518,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.bridge.detach()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.debug_server.stop()
         except Exception:  # noqa: BLE001
             pass
         super().closeEvent(event)
