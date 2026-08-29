@@ -101,17 +101,35 @@ class MqttProxy(QObject):
             except Exception:  # noqa: BLE001
                 pass
             self._subscribed_pubsub = False
-        if self._client is not None:
-            try:
-                self._client.loop_stop()
-                self._client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
-            self._client = None
+
+        # Detach immediately so is_running/is_connected reflect the new
+        # state right away and nothing else can reach this client anymore.
+        client, self._client = self._client, None
         self._iface = None
         if self._connected:
             self._connected = False
             self.connected_changed.emit(False)
+
+        if client is not None:
+            # client.loop_stop()/disconnect() block waiting for paho's own
+            # network thread to join. stop() runs on the GUI thread (called
+            # right from the connection-lost handler) — if that network
+            # thread is itself stuck (e.g. the link just died mid-write),
+            # calling this synchronously here would freeze/deadlock the
+            # whole app. Tear it down on a throwaway daemon thread instead;
+            # nothing else holds a reference to `client` anymore, so this is
+            # safe to finish fully in the background.
+            def _teardown():
+                try:
+                    client.loop_stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    client.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            threading.Thread(target=_teardown, daemon=True, name="mqtt-proxy-teardown").start()
 
     @property
     def is_running(self):
