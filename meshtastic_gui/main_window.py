@@ -22,6 +22,20 @@ def _channel_role_name(ch):
         return str(ch.role)
 
 
+def _modem_preset_name(node):
+    """When a channel's settings.name is empty, every other Meshtastic client
+    (the phone app, the MQTT topic path itself — 'msh/ID/2/e/LongFast/...')
+    falls back to displaying the radio's modem preset, e.g. 'LongFast'. We
+    were instead showing a generic 'Default' placeholder, which looked like
+    the channel had no real name at all."""
+    try:
+        from meshtastic.protobuf import config_pb2
+        raw = config_pb2.Config.LoRaConfig.ModemPreset.Name(node.localConfig.lora.modem_preset)
+        return "".join(word.capitalize() for word in raw.split("_"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -394,13 +408,16 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 pass
             raise RuntimeError("Data channel belum diterima dari perangkat, coba Refresh lagi sebentar lagi.")
+        preset_name = _modem_preset_name(node)
         result = []
         for ch in node.channels:
             role = _channel_role_name(ch)
             if role == "DISABLED":
                 continue
-            name = ch.settings.name or ("Default" if role == "PRIMARY" else "")
-            result.append({"index": ch.index, "role": role, "name": name})
+            name = ch.settings.name
+            if not name and role == "PRIMARY":
+                name = preset_name or "Default"
+            result.append({"index": ch.index, "role": role, "name": name or ""})
         self.messages_tab.set_channel_names(result)
         return result
 
