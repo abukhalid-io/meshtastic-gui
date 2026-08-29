@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
             on_clean_node_db=self._clean_node_db,
             on_open_channels=lambda: self.tabs.setCurrentWidget(self.channels_tab),
         )
-        self.map_tab = MapTab()
+        self.map_tab = MapTab(on_set_fixed_position=self._set_fixed_position)
         self.log_tab = LogTab()
 
         self.tabs.addTab(self.dashboard_tab, "Dashboard")
@@ -198,6 +198,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Terhubung")
         self.messages_tab.set_enabled(True)
         self.channels_tab.set_enabled(True)
+        self.map_tab.set_enabled(True)
+        if self._my_node_id:
+            self.map_tab.set_my_node_id(self._my_node_id)
         self.log_tab.append("Koneksi berhasil dibuka.")
 
     def _on_worker_failed(self, message):
@@ -227,6 +230,7 @@ class MainWindow(QMainWindow):
         self.channels_tab.clear()
         self.settings_tab.clear()
         self.nodes_tab.clear()
+        self.map_tab.set_enabled(False)
         self.map_tab.clear()
         self.statusBar().showMessage("Terputus" if not silent else "Koneksi terputus tak terduga")
 
@@ -256,11 +260,13 @@ class MainWindow(QMainWindow):
 
     def _prefill_owner(self, iface):
         self._my_user = None
+        self._my_node_id = None
         try:
             node_num = getattr(iface.myInfo, "my_node_num", None)
             for n in dict(getattr(iface, "nodes", {}) or {}).values():
                 if n.get("num") == node_num:
                     self._my_user = n.get("user", {}) or {}
+                    self._my_node_id = (self._my_user or {}).get("id") or f"!{node_num:08x}"
                     return
         except Exception as e:  # noqa: BLE001
             self.log_tab.append(f"Tidak bisa membaca nama owner saat ini: {e}")
@@ -293,6 +299,11 @@ class MainWindow(QMainWindow):
         node = self._require_node()
         node.resetNodeDb()
         self.log_tab.append("Perintah bersihkan node database dikirim.")
+
+    def _set_fixed_position(self, lat, lon, alt=0):
+        node = self._require_node()
+        node.setFixedPosition(lat, lon, alt)
+        self.log_tab.append(f"Posisi tetap diset: {lat:.6f}, {lon:.6f}")
 
     # -- per-node actions (Nodes tab context menu) --------------------------
     def _favorite_node(self, node_id):

@@ -1,164 +1,242 @@
-"""A lightweight offline 'mesh map' — plots nodes that have reported a GPS
-position on a simple 2D canvas (equirectangular projection, no tile imagery
-needed/possible without internet). This mirrors the spirit of the Android
-app's Map tab: see where your nodes are relative to each other at a glance."""
-import math
+"""Real basemap for node positions, via Leaflet (bundled locally by pyqtlet2 —
+no internet needed for the map *library* itself, only for tile *images*).
 
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF
-from PySide6.QtGui import QPainter, QColor, QPen, QFont
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+Works two ways:
+  - Online: default tile source is the public OpenStreetMap tile servers.
+  - Offline: pick "Custom / offline" and point it at any XYZ tile URL you
+    control — a local tile server serving pre-downloaded tiles, an MBTiles
+    extraction served over http://localhost, or a file:// path to a folder
+    of {z}/{x}/{y}.png tiles. Leaflet doesn't care where tiles come from.
+
+Most Meshtastic nodes never report a GPS position (no GPS hardware, or it's
+a stationary base node) — in that case use "Set posisi tetap" below to pin
+your own node's location manually (meshtastic-python's setFixedPosition).
+"""
+import colorsys
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QComboBox, QDoubleSpinBox, QMessageBox
+)
+from pyqtlet2 import L, MapWidget
 
 from .. import theme
 from ..utils import node_display_id, fmt_timestamp
 
-MARGIN = 40
-MARKER_R = 9
+DEFAULT_CENTER = [-2.5, 118.0]  # Indonesia-ish — a sane default before any data
+DEFAULT_ZOOM = 5
+
+TILE_PRESETS = {
+    "OpenStreetMap (online)": (
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        {"attribution": "© OpenStreetMap contributors", "maxZoom": 19},
+    ),
+}
+CUSTOM_LABEL = "Custom / offline (URL manual)..."
 
 
-def _color_for_id(node_id: str) -> QColor:
+def _color_for_id(node_id: str) -> str:
     h = abs(hash(node_id))
-    hue = h % 360
-    c = QColor()
-    c.setHsv(hue, 200, 255)
-    return c
+    hue = (h % 360) / 360
+    r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.95)
+    return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
 
 
-class MapCanvas(QWidget):
-    node_clicked = Signal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumHeight(320)
-        self._nodes = {}  # node_id -> node dict (must have position.lat/lon)
-        self._marker_positions = {}  # node_id -> QPointF (screen space, updated on paint)
-
-    def set_nodes(self, nodes: dict):
-        self._nodes = nodes
-        self.update()
-
-    def _positioned_nodes(self):
-        out = []
-        for node_id, node in self._nodes.items():
-            pos = node.get("position", {}) or {}
-            lat, lon = pos.get("latitude"), pos.get("longitude")
-            if lat is None or lon is None:
-                continue
-            out.append((node_id, node, lat, lon))
-        return out
-
-    def paintEvent(self, event):  # noqa: N802 - Qt override
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(theme.PANEL))
-
-        points = self._positioned_nodes()
-        self._marker_positions = {}
-
-        if not points:
-            p.setPen(QColor(theme.TEXT_MUTED))
-            p.drawText(self.rect(), Qt.AlignCenter, "Belum ada node dengan data posisi GPS.")
-            p.end()
-            return
-
-        lats = [pt[2] for pt in points]
-        lons = [pt[3] for pt in points]
-        lat_min, lat_max = min(lats), max(lats)
-        lon_min, lon_max = min(lons), max(lons)
-        # Guard against a single point / degenerate span.
-        lat_span = max(lat_max - lat_min, 1e-4)
-        lon_span = max(lon_max - lon_min, 1e-4)
-
-        w = max(self.width() - 2 * MARGIN, 10)
-        h = max(self.height() - 2 * MARGIN, 10)
-        # Latitude compression so shapes aren't wildly distorted at higher latitudes.
-        lat_mid_rad = math.radians((lat_min + lat_max) / 2)
-        lon_scale = max(math.cos(lat_mid_rad), 0.15)
-
-        def to_screen(lat, lon):
-            x = MARGIN + ((lon - lon_min) * lon_scale) / (lon_span * lon_scale) * w
-            y = MARGIN + (1 - (lat - lat_min) / lat_span) * h
-            return QPointF(x, y)
-
-        # Links: draw a faint line from every node to every other (mesh feel) —
-        # skip if too many nodes to stay legible.
-        if len(points) <= 25:
-            pen = QPen(QColor(theme.BORDER))
-            pen.setWidthF(1)
-            p.setPen(pen)
-            screen_pts = [to_screen(lat, lon) for _, _, lat, lon in points]
-            for i in range(len(screen_pts)):
-                for j in range(i + 1, len(screen_pts)):
-                    p.drawLine(screen_pts[i], screen_pts[j])
-
-        font = QFont()
-        font.setPointSize(8)
-        p.setFont(font)
-
-        for node_id, node, lat, lon in points:
-            pt = to_screen(lat, lon)
-            self._marker_positions[node_id] = pt
-            color = _color_for_id(node_id)
-            p.setPen(Qt.NoPen)
-            p.setBrush(color)
-            p.drawEllipse(pt, MARKER_R, MARKER_R)
-
-            user = node.get("user", {}) or {}
-            label = user.get("shortName") or node_id[-4:]
-            p.setPen(QColor(theme.TEXT))
-            text_rect = QRectF(pt.x() - 30, pt.y() + MARKER_R + 2, 60, 16)
-            p.drawText(text_rect, Qt.AlignHCenter | Qt.AlignTop, label)
-
-        p.end()
-
-    def mousePressEvent(self, event):  # noqa: N802 - Qt override
-        click = event.position() if hasattr(event, "position") else event.pos()
-        cx, cy = click.x(), click.y()
-        for node_id, pt in self._marker_positions.items():
-            if (pt.x() - cx) ** 2 + (pt.y() - cy) ** 2 <= (MARKER_R + 4) ** 2:
-                self.node_clicked.emit(node_id)
-                return
+def _esc(value) -> str:
+    """Leaflet popup content is spliced straight into a JS double-quoted
+    string literal by pyqtlet2 — escape what would otherwise break out."""
+    return (str(value).replace("\\", "\\\\").replace('"', "'")
+            .replace("\n", "<br>"))
 
 
 class MapTab(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, on_set_fixed_position, parent=None):
+        """on_set_fixed_position(lat: float, lon: float, alt: int) -> None"""
         super().__init__(parent)
+        self._on_set_fixed_position = on_set_fixed_position
+
+        self._nodes = {}     # node_id -> node dict
+        self._markers = {}   # node_id -> L.circleMarker
+        self._my_node_id = None
+        self._has_fit_once = False
+
         layout = QVBoxLayout(self)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Peta node (offline, posisi relatif — bukan citra satelit)"))
-        top.addStretch(1)
+        top.addWidget(QLabel("Sumber peta:"))
+        self.tile_combo = QComboBox()
+        self.tile_combo.addItems(list(TILE_PRESETS.keys()) + [CUSTOM_LABEL])
+        self.tile_combo.currentIndexChanged.connect(self._on_tile_source_changed)
+        top.addWidget(self.tile_combo)
+
+        self.tile_url_edit = QLineEdit()
+        self.tile_url_edit.setPlaceholderText(
+            "mis. http://localhost:8080/{z}/{x}/{y}.png atau file:///D:/tiles/{z}/{x}/{y}.png"
+        )
+        self.tile_url_edit.setVisible(False)
+        top.addWidget(self.tile_url_edit, 1)
+
+        self.apply_tile_btn = QPushButton("Terapkan")
+        self.apply_tile_btn.setVisible(False)
+        self.apply_tile_btn.clicked.connect(self._apply_custom_tile)
+        top.addWidget(self.apply_tile_btn)
         layout.addLayout(top)
 
-        self.canvas = MapCanvas()
-        self.canvas.node_clicked.connect(self._on_node_clicked)
-        layout.addWidget(self.canvas, 1)
+        self.map_widget = MapWidget()
+        # pyqtlet2 loads its map.html from a file:// URL. QtWebEngine treats
+        # local-file pages as untrusted by default and blocks them from
+        # fetching remote resources — which silently kills every tile
+        # request, leaving Leaflet's JS/markers working but the basemap
+        # permanently blank. Explicitly allow it for this one page.
+        try:
+            from PySide6.QtWebEngineCore import QWebEngineSettings
+            # NOTE: pyqtlet2's MapWidget exposes `.page` as a @property
+            # (not QWebEngineView's own `.page()` method) — no parens here.
+            self.map_widget.page.settings().setAttribute(
+                QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
+            )
+        except Exception:  # noqa: BLE001 - tiles just won't load if this ever fails
+            pass
+        layout.addWidget(self.map_widget, 1)
+        self.map = L.map(self.map_widget)
+        self.map.setView(DEFAULT_CENTER, DEFAULT_ZOOM)
+        self._tile_layer = None
+        self._set_tile_layer(*TILE_PRESETS["OpenStreetMap (online)"])
 
-        self.detail_label = QLabel("Klik sebuah node di peta untuk lihat detail singkat.")
-        self.detail_label.setWordWrap(True)
-        layout.addWidget(self.detail_label)
+        self.hint_label = QLabel(
+            "Belum ada node dengan posisi GPS — ini normal, kebanyakan node Meshtastic tidak "
+            "punya modul GPS. Klik-kanan node di tab Nodes untuk 'Minta posisi', atau set posisi "
+            "tetap untuk node kamu sendiri di bawah."
+        )
+        self.hint_label.setWordWrap(True)
+        layout.addWidget(self.hint_label)
 
-        self._nodes = {}
+        fixed_row = QHBoxLayout()
+        fixed_row.addWidget(QLabel("Set posisi tetap node saya — Lat:"))
+        self.lat_spin = QDoubleSpinBox()
+        self.lat_spin.setRange(-90, 90)
+        self.lat_spin.setDecimals(6)
+        fixed_row.addWidget(self.lat_spin)
+        fixed_row.addWidget(QLabel("Lon:"))
+        self.lon_spin = QDoubleSpinBox()
+        self.lon_spin.setRange(-180, 180)
+        self.lon_spin.setDecimals(6)
+        fixed_row.addWidget(self.lon_spin)
+        self.set_fixed_btn = QPushButton("Terapkan")
+        self.set_fixed_btn.setObjectName("primary")
+        self.set_fixed_btn.clicked.connect(self._apply_fixed_position)
+        fixed_row.addWidget(self.set_fixed_btn)
+        layout.addLayout(fixed_row)
+
+        self.set_enabled(False)
+
+    # -- tile source ---------------------------------------------------------
+    def _set_tile_layer(self, url, options):
+        if self._tile_layer is not None:
+            self.map.removeLayer(self._tile_layer)
+        self._tile_layer = L.tileLayer(url, options)
+        self._tile_layer.addTo(self.map)
+
+    def _on_tile_source_changed(self, _index):
+        text = self.tile_combo.currentText()
+        is_custom = text == CUSTOM_LABEL
+        self.tile_url_edit.setVisible(is_custom)
+        self.apply_tile_btn.setVisible(is_custom)
+        if not is_custom:
+            self._set_tile_layer(*TILE_PRESETS[text])
+
+    def _apply_custom_tile(self):
+        url = self.tile_url_edit.text().strip()
+        if not url:
+            return
+        self._set_tile_layer(url, {"maxZoom": 19, "attribution": "Custom tile source"})
+
+    # -- lifecycle -------------------------------------------------------
+    def set_enabled(self, enabled: bool):
+        for w in (self.lat_spin, self.lon_spin, self.set_fixed_btn):
+            w.setEnabled(enabled)
 
     def clear(self):
-        self._nodes = {}
-        self.canvas.set_nodes({})
-        self.detail_label.setText("Klik sebuah node di peta untuk lihat detail singkat.")
+        for marker in self._markers.values():
+            self.map.removeLayer(marker)
+        self._markers.clear()
+        self._nodes.clear()
+        self._my_node_id = None
+        self._has_fit_once = False
+        self.hint_label.setVisible(True)
+        self.map.setView(DEFAULT_CENTER, DEFAULT_ZOOM)
 
+    def set_my_node_id(self, node_id):
+        self._my_node_id = node_id
+        # If we already drew our own marker under the "not yet known" color,
+        # refresh it now that we know it's "us".
+        if node_id in self._nodes:
+            self._draw_marker(node_id, self._nodes[node_id])
+
+    # -- node data ---------------------------------------------------------
     def upsert_node(self, node: dict):
         node_id = node_display_id(node)
         self._nodes[node_id] = node
-        self.canvas.set_nodes(self._nodes)
+        self._draw_marker(node_id, node)
 
-    def _on_node_clicked(self, node_id):
-        node = self._nodes.get(node_id, {})
-        user = node.get("user", {}) or {}
+    def _draw_marker(self, node_id, node):
         pos = node.get("position", {}) or {}
-        name = user.get("longName", node_id)
         lat, lon = pos.get("latitude"), pos.get("longitude")
-        alt = pos.get("altitude")
+        if lat is None or lon is None:
+            return
+
+        user = node.get("user", {}) or {}
+        name = user.get("longName") or user.get("shortName") or node_id
+        is_me = node_id == self._my_node_id
+        color = theme.ACCENT if is_me else _color_for_id(node_id)
+        radius = 10 if is_me else 7
+
+        marker = self._markers.get(node_id)
+        if marker is None:
+            marker = L.circleMarker([lat, lon], {
+                "radius": radius, "color": color, "fillColor": color,
+                "fillOpacity": 0.85, "weight": 2,
+            })
+            marker.addTo(self.map)
+            self._markers[node_id] = marker
+        else:
+            marker.setLatLng([lat, lon])
+
+        battery = (node.get("deviceMetrics", {}) or {}).get("batteryLevel")
         last_heard = fmt_timestamp(node.get("lastHeard"))
-        parts = [f"{name} ({node_id})", f"Posisi: {lat:.5f}, {lon:.5f}"]
-        if alt is not None:
-            parts.append(f"Altitude: {alt} m")
-        parts.append(f"Terakhir terdengar: {last_heard}")
-        self.detail_label.setText(" · ".join(parts))
+        lines = [f"<b>{_esc(name)}</b>" + (" (saya)" if is_me else ""), _esc(node_id)]
+        if battery is not None:
+            lines.append(f"Baterai: {_esc(battery)}%")
+        lines.append(f"Terakhir: {_esc(last_heard)}")
+        marker.bindPopup("<br>".join(lines))
+
+        self.hint_label.setVisible(False)
+        self._maybe_fit_bounds()
+
+    def _maybe_fit_bounds(self):
+        if self._has_fit_once:
+            return
+        coords = []
+        for node in self._nodes.values():
+            pos = node.get("position", {}) or {}
+            if pos.get("latitude") is not None and pos.get("longitude") is not None:
+                coords.append([pos["latitude"], pos["longitude"]])
+        if not coords:
+            return
+        self._has_fit_once = True
+        if len(coords) == 1:
+            self.map.setView(coords[0], 15)
+        else:
+            self.map.fitBounds(coords)
+
+    # -- set fixed position ---------------------------------------------
+    def _apply_fixed_position(self):
+        lat, lon = self.lat_spin.value(), self.lon_spin.value()
+        if lat == 0 and lon == 0:
+            QMessageBox.warning(self, "Koordinat kosong", "Isi lat/lon dulu (0,0 bukan lokasi valid).")
+            return
+        try:
+            self._on_set_fixed_position(lat, lon, 0)
+            QMessageBox.information(self, "Berhasil", "Posisi tetap dikirim ke perangkat.")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Gagal", str(e))

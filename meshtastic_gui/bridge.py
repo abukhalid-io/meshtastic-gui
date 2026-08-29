@@ -7,11 +7,44 @@ only through Qt signals, which are safe to cross threads with a queued
 connection (PySide6 does this automatically for Auto-connections between
 objects that live in different threads).
 """
+import gc
 import time
 import traceback
 
 from PySide6.QtCore import QObject, QThread, Signal
 from pubsub import pub
+
+
+def _force_release_stream(port_hint=None):
+    """Best-effort cleanup for a meshtastic-python quirk: StreamInterface's
+    own close()-on-failed-handshake tries to politely tell the device
+    "disconnect" first (_sendDisconnect -> a write over the same broken
+    link). When that write also fails, the exception is swallowed and the
+    code path that actually closes the OS-level serial handle is never
+    reached — the port stays open in exclusive mode for the rest of this
+    process's life, so every later connect attempt gets "Access is denied"
+    even though nothing in our own app is holding it.
+
+    We reach into the garbage collector for any leftover StreamInterface
+    (SerialInterface/TCPInterface) whose stream matches the port we just
+    failed to open, and force its handle shut directly."""
+    try:
+        from meshtastic.stream_interface import StreamInterface
+    except ImportError:
+        return
+    for obj in gc.get_objects():
+        if not isinstance(obj, StreamInterface):
+            continue
+        stream = getattr(obj, "stream", None)
+        if stream is None:
+            continue
+        if port_hint is not None and getattr(stream, "port", None) != port_hint:
+            continue
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+        obj.stream = None
 
 
 class ConnectWorker(QThread):
@@ -38,6 +71,7 @@ class ConnectWorker(QThread):
                 iface = ti.TCPInterface(hostname=self.tcp_host)
             self.connected.emit(iface)
         except Exception as e:  # noqa: BLE001 - surface any failure to the UI
+            _force_release_stream(self.serial_port if self.mode == "serial" else None)
             self.failed.emit(f"{e}\n{traceback.format_exc(limit=2)}")
 
 
@@ -73,10 +107,12 @@ class MeshtasticBridge(QObject):
     def detach(self):
         iface, self.iface = self.iface, None
         if iface is not None:
+            port_hint = getattr(getattr(iface, "stream", None), "port", None)
             try:
                 iface.close()
             except Exception as e:  # noqa: BLE001
                 self.log.emit(f"Error while closing interface: {e}")
+                _force_release_stream(port_hint)
 
     # -- pubsub callbacks (fire on the interface's own reader thread) ------
     def _on_receive(self, packet, interface):
