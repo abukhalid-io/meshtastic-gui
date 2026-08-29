@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self.mqtt_proxy.status_changed.connect(lambda s: self.log_tab.append(f"[MQTT proxy] {s}"))
         self.mqtt_proxy.connected_changed.connect(self.dashboard_tab.set_proxy_connected)
         self.mqtt_proxy.node_seen.connect(self.dashboard_tab.upsert_mqtt_node)
+        self.mqtt_proxy.node_seen.connect(self._on_mqtt_node_seen)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -154,6 +155,21 @@ class MainWindow(QMainWindow):
         self.nodes_tab.upsert_node(node)
         self.map_tab.upsert_node(node)
         self.messages_tab.update_known_nodes(self.nodes_tab.known_nodes())
+
+    def _on_mqtt_node_seen(self, info):
+        """A node was heard via the MQTT broker (see mqtt_proxy.node_seen).
+        Only add a stub row if we don't already know this node for real
+        (via LoRa/local NodeDB) — never clobber real name/model/etc. with
+        this bare, MQTT-only sighting."""
+        node_id = info.get("node_id")
+        if not node_id or self.nodes_tab.has_node(node_id):
+            return
+        stub = {
+            "num": int(node_id[1:], 16),
+            "lastHeard": info["ts"],
+            "user": {"id": node_id, "hwModel": "🌐 via MQTT (bukan LoRa)"},
+        }
+        self.nodes_tab.upsert_node(stub)
 
     # ---------------------------------------------------------- connect UI
     def _on_connect_clicked(self):

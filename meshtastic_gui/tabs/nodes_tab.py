@@ -66,6 +66,9 @@ class NodesTab(QWidget):
         self._nodes[node_id] = node
         self._apply_filter_sort()
 
+    def has_node(self, node_id: str) -> bool:
+        return node_id in self._nodes
+
     def known_nodes(self):
         """Returns {node_id: display_label} for other tabs (e.g. DM target picker)."""
         out = {}
